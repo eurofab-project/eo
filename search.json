@@ -1,5 +1,19 @@
 [
   {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "EuroFab research project",
+    "section": "",
+    "text": "The landing page of the EuroFab project."
+  },
+  {
+    "objectID": "notebooks/hilbert_split.html",
+    "href": "notebooks/hilbert_split.html",
+    "title": "Hilbert distance-based split into train and test",
+    "section": "",
+    "text": "This notebook illustrates the core of the approach to split chips into train and test used in the CEUS paper. There it was a bit more complicated than that but the principle is illustrated here.\n\nimport geopandas as gpd\nimport numpy as np\nfrom shapely import box\n\nGet only a subset of the country for illustration - NW.\n\nstart_x, start_y, end_x, end_y = (321566, 365379, 468106, 437198)\n\nLoad the data and clip them to the box defined above. The data from https://figshare.com/ndownloader/files/38736501\n\nsignatures  = gpd.read_file(\"/Users/martin/Downloads/spatial_signatures_GB_simplified.gpkg\", bbox=(start_x, start_y, end_x, end_y)).clip(box(start_x, start_y, end_x, end_y))\n\nGet coordinates of chip centroids.\n\nx_coords = np.arange(start_x, end_x, 250)\ny_coords = np.arange(start_y, end_y, 250)\nxv, yv = np.meshgrid(x_coords, y_coords)\ncombinations = np.vstack([xv.ravel(), yv.ravel()])\n\nGet chip geoemtry.\n\ngrid_cells = gpd.GeoSeries.from_xy(x=combinations[0], y=combinations[1], crs=signatures.crs).buffer(125, cap_style=3)\n\nFilter only those fully within signatures.\n\nsig_idx, grid_idx = grid_cells.sindex.query(signatures.geometry, predicate=\"contains\")\nvalid_grid_cells = grid_cells.iloc[grid_idx].to_frame('geometry')\nvalid_grid_cells[\"sig_id\"] = sig_idx\n\nGet unique signature IDs to pull from.\n\nunique = valid_grid_cells.sig_id.unique()\nunique.shape[0]\n\n745\n\n\nIllustrate the split using Hilbert distance. Chip groups with less than 20 chips are not split and should be allocated together either to train or test. The distance itself could be retrieved via GeoSeries.hilbert_distance() if needed.\n\ng = valid_grid_cells[valid_grid_cells.sig_id == unique[79]]\nif g.shape[0] &gt; 20:\n    split = np.empty(g.shape[0], dtype=int)\n    floor = int(np.floor(g.shape[0] * 0.8))\n    split[:floor] = 0\n    split[floor:] = 1\nelse:\n    split = np.ones(g.shape[0])\ng.sort_values(\"geometry\").plot(split)"
+  },
+  {
     "objectID": "notebooks/hello.html",
     "href": "notebooks/hello.html",
     "title": "Example notebook",
@@ -9,12 +23,5 @@
       "Notebooks",
       "Example notebook"
     ]
-  },
-  {
-    "objectID": "index.html",
-    "href": "index.html",
-    "title": "EuroFab research project",
-    "section": "",
-    "text": "The landing page of the EuroFab project."
   }
 ]
