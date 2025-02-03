@@ -1,109 +1,112 @@
-import os
-import glob
 import torch
+import rasterio
 import torchvision
+import geopandas as gpd
+import numpy as np
+import collections
 import xgboost as xgb
 import pandas as pd
-import numpy as np
-import tifffile
-import collections
-import argparse
-from pathlib import Path
+import h3.api.numpy_int as h3
+from rasterio.mask import mask
 from torchvision.ops import FeaturePyramidNetwork
 from torch.utils.data import Dataset, DataLoader
 from torch.cuda.amp import autocast
-
-import dask.dataframe as dd
-
-import tools_sat_ss as tools
-
-#########################################################
-# Step 1: Chip Extraction (from VRT to TIF Chips)
-#########################################################
+from sklearn.preprocessing import LabelEncoder
+from pyproj import Transformer
+import matplotlib.pyplot as plt
 
 
-def calculate_centroids_partition(df):
-    centroids = df.geometry.centroid
-
-    return pd.DataFrame({
-        "centroid_x": centroids.x,
-        "centroid_y": centroids.y
-    }, index=df.index)
-
-def sample_partition(df):
-    return df.groupby('type_clean').apply(
-        lambda x: x.sample(n=min(50000, len(x)), random_state=42)
-    )
-
-def create_chips_from_vrt(grid_25_file, signatures_file, specs, npartitions=16):
-    """
-    Creates 25x25 pixel chips from a large VRT mosaic and saves them as individual .tif files.
+class GeoTileDataset(Dataset):
+    def __init__(self, geo_path, vrt_file, normalization_ranges=None):
+        """
+        Dataset for loading geospatial tiles from a GeoJSON or GeoParquet file.
+        """
+        self.geo_path = geo_path
+        self.vrt_file = vrt_file
+        self.normalization_ranges = normalization_ranges
+        self.grid = self._load_geospatial_data()
     
-    geo_df: GeoDataFrame containing geometry and metadata for each chip location
-    specs: dict with fields like:
-        {
-            'chip_size': 25,
-            'bands': [1, 2, 3],
-            'mosaic_p': '/path/to/GHS-composite-S2.vrt',
-            'folder': '/path/to/output/chips/',
-            'normalize': True,
-            'normalization_ranges': [(350,1600),(500,1600),(600,1800)]
-        }
-    npartitions: number of Dask partitions
+    def _load_geospatial_data(self):
+        if self.geo_path.endswith(".geojson"):
+            return gpd.read_file(self.geo_path)
+        elif self.geo_path.endswith(".parquet"):
+            return gpd.read_parquet(self.geo_path)
+        else:
+            raise ValueError("Unsupported file format. Provide a GeoJSON or GeoParquet file.")
+
+    def __len__(self):
+        return len(self.grid)
+
+    def __getitem__(self, idx):
+        tile = self.grid.iloc[idx]
+        
+        # Extract tile geometry
+        geom = [tile.geometry]
+        
+        # Read raster data
+        with rasterio.open(self.vrt_file) as src:
+            raster, _ = mask(src, geom, crop=True, all_touched=True)
+        
+        raster = raster[:3, :, :]  # Keep first 3 bands
+
+        # Normalize raster if ranges are provided
+        if self.normalization_ranges:
+            for i in range(min(raster.shape[0], len(self.normalization_ranges))):
+                l_min, l_max = self.normalization_ranges[i]
+                raster[i] = np.clip(raster[i], l_min, l_max)
+                raster[i] = (raster[i] - l_min) / (l_max - l_min)
+        
+        raster = raster.astype(float) / 255.0  # Normalize to [0, 1]
+        raster = torch.tensor(raster, dtype=torch.float32)
+        return raster, tile
+
+
+def custom_collate_fn(batch):
+    """Custom collate function for handling batch processing."""
+    images, tiles = zip(*batch)
+    images = torch.stack(images, dim=0)
+    return images, tiles
+
+def custom_collate_fn(batch):
+    """Custom collate function for handling batch processing."""
+    images, tiles = zip(*batch)
+    images = torch.stack(images, dim=0)
+    return images, tiles
+
+def read_data(geojson_path, vrt_file):
+    dataset = GeoTileDataset(geojson_path, vrt_file, normalization_ranges =[(350, 1600), (500, 1600), (600, 1800)])
+    dataloader = DataLoader(dataset, batch_size=16, num_workers=4, collate_fn=custom_collate_fn)
+    
+    return dataset, dataloader
+
+def plot_examples(dataset, num_examples=5):
     """
+    Plot examples from the dataset.
 
-    # Load grid and spatial signatures
-    grid_25 = gpd.read_file(grid_25_file)
-    ss_gdf = gpd.read_file(signatures_file, layer='spatial_signatures_GB_clean')
-    ss_gdf = ss_gdf[ss_gdf['type'] != 'outlier']
+    Parameters:
+        dataset (GeoTileDataset): The dataset to visualize.
+        num_examples (int): Number of examples to plot.
+    """
+    for i in range(min(num_examples, len(dataset))):
+        raster, tile = dataset[i]
+        raster = raster * 255.0
+        raster = raster.numpy().transpose(1, 2, 0)  # Convert back to HWC format for plotting
+        centroid = tile.geometry.centroid
 
-    # Define urbanity classes and clean 'type' column
-    urbanity_classes = ['Local urbanity', 'Regional urbanity', 'Metropolitan urbanity', 'Concentrated urbanity', 'Hyper concentrated urbanity']
-    ss_gdf['type_clean'] = ss_gdf['type'].apply(lambda x: 'Urbanity' if x in urbanity_classes else x)
-    le = LabelEncoder()
-    ss_gdf['type_clean_encode'] = le.fit_transform(ss_gdf['type_clean'])
+        plt.figure(figsize=(8, 8))
+        plt.imshow(raster)
+        plt.title(f"Tile Centroid: ({centroid.x:.2f}, {centroid.y:.2f})")
+        plt.axis("off")
+        plt.show()
 
-    overlap_25 = dgpd.sjoin(grid_25, ss_gdf, how='inner', predicate='within').compute()
-
-    sel = grid_25[grid_25['id'].isin(overlap_25['id_left'])]
-    sel_dask = dgpd.from_geopandas(sel, npartitions=4)  
-
-
-    # Use `meta` for output format specification
-    meta = pd.DataFrame({"centroid_x": pd.Series(dtype="float64"), "centroid_y": pd.Series(dtype="float64")})
-
-    # Apply the function to each partition
-    centroids = sel_dask.map_partitions(calculate_centroids_partition, meta=meta).compute()
-
-
-    # Convert centroids to a Dask DataFrame
-    centroids_dd = dd.from_pandas(pd.DataFrame(centroids, columns=["centroid_x", "centroid_y"]), npartitions=sel_dask.npartitions)
-
-    # Assign each column to `sel` as a Dask Series
-    sel["X"] = centroids_dd["centroid_x"]
-    sel["Y"] = centroids_dd["centroid_y"]
-
-    # Perform the second spatial join
-    sel_25 = dgpd.sjoin(sel, ss_gdf, how="inner", predicate="within").compute()
-    sel_25 = sel_25[["X", "Y", "type_clean", "geometry"]]
-
-    sampled_df = sel_25_repartitioned.map_partitions(sample_partition).compute()
-    sampled_df['type_clean'] = sampled_df['type_clean'].replace('Warehouse/Park land', 'Warehouse')
-
-    tools.spilled_bag_of_chips(sampled_df, specs, npartitions=npartitions)
-
-#########################################################
-# Step 2: Embeddings Extraction
-#########################################################
 
 def load_model(model_weights_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = torchvision.models.swin_transformer.swin_v2_b().to(device)
-
     full_state_dict = torch.load(model_weights_path, map_location=device)
 
     swin_prefix = 'backbone.backbone.'
-    fpn_prefix = 'intermediates.0.fpn.'
+    fpn_prefix = 'intermediates.0.fpn.'  # FPN
 
     swin_state_dict = {k[len(swin_prefix):]: v for k, v in full_state_dict.items() if k.startswith(swin_prefix)}
     model.load_state_dict(swin_state_dict)
@@ -114,187 +117,129 @@ def load_model(model_weights_path):
 
     return model, fpn
 
-class TIFDataset(Dataset):
-    def __init__(self, image_paths, normalize=False):
-        self.image_paths = image_paths
-        self.normalize = normalize
 
-    def __len__(self):
-        return len(self.image_paths)
+def extract_embeddings(dataloader, model, fpn, device):
+    #model.eval()
+    embeddings = []
+    tiles = []
+    with torch.no_grad():
+        for batch in dataloader:
+            images, meta = batch
+            images = images.to(device)
+            
+            with torch.amp.autocast('cuda'):
+                outputs = []
+                x = images
+                for layer in model.features:
+                    x = layer(x)
+                    outputs.append(x.permute(0, 3, 1, 2))
+                map1, map2, map3, map4 = outputs[-7], outputs[-5], outputs[-3], outputs[-1]
 
-    def __getitem__(self, idx):
-        image_path = self.image_paths[idx]
-        im = tifffile.imread(image_path)
-        im = im.astype(float)
+                # Process feature maps with FPN
+                feature_maps_raw = [map1, map2, map3, map4]
+                inp = collections.OrderedDict([('feat{}'.format(i), el) for i, el in enumerate(feature_maps_raw)])
+                fpn_output = fpn(inp)
+                fpn_output = list(fpn_output.values())
 
-        # Move to [C, H, W]
-        im = im.transpose(2, 0, 1) 
-        return torch.from_numpy(im).float(), image_path
+                avgpool = torch.nn.AdaptiveAvgPool2d(1)
+                features = avgpool(fpn_output[-1])[:, :, 0, 0]  # Global avg pooling
 
-def extract_feature_vectors(batch, model, fpn, device):
-    images, paths = batch
-    images = images.to(device)
+            embeddings.append(features.cpu().numpy())
+            tiles.extend(meta)
 
-    with autocast(), torch.no_grad():
-        outputs = []
-        x = images
-        for layer in model.features:
-            x = layer(x)
-            outputs.append(x.permute(0, 3, 1, 2))
-        map1, map2, map3, map4 = outputs[-7], outputs[-5], outputs[-3], outputs[-1]
+    return np.vstack(embeddings), tiles
 
-        inp = collections.OrderedDict([('feat{}'.format(i), el) for i, el in enumerate([map1, map2, map3, map4])])
-        fpn_output = fpn(inp)
-        fpn_output = list(fpn_output.values())
 
-        avgpool = torch.nn.AdaptiveAvgPool2d(1)
-        features = avgpool(fpn_output[-1])[:, :, 0, 0]
+def classify_tiles(embeddings, tiles, classifier, ss_gdf, transformer):
+    lon_lat = []
+    features_with_h3 = []
 
-    return features.cpu().numpy(), paths
+    for tile in tiles:
+        centroid = tile.geometry.centroid
+        lon, lat = transformer.transform(centroid.x, centroid.y)
 
-def process_images_in_batches(folder_path, model, fpn, batch_size=16, normalize=False):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    fpn.to(device)
+        h3_resolution = 5
+        h3_index = h3.latlng_to_cell(lat, lon, h3_resolution)
+        #lat_h5, lon_h5 = h3.h3shape_to_geo(h3_index) #previous version
+        lat_h5, lon_h5 = h3.cell_to_latlng(h3_index)
 
-    image_paths = sorted(glob.glob(os.path.join(folder_path, "*/*.tif")))
+        lon_lat.append((lon, lat))
+        features_with_h3.append([lat_h5, lon_h5])
 
-    dataset = TIFDataset(image_paths, normalize=normalize)
-    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=4, shuffle=False)
+    # Combine embeddings with H3 lat/lon
+    combined_features = np.hstack([embeddings, np.array(features_with_h3)])
 
-    all_features = []
-    all_paths = []
+    predictions = classifier.predict(combined_features)
+    probas = classifier.predict_proba(combined_features)
 
-    print("Processing images in batches...")
-    for batch in dataloader:
-        features, paths = extract_feature_vectors(batch, model, fpn, device)
-        all_features.append(features)
-        all_paths.extend(paths)
+    results = []
+    for idx, (lon, lat) in enumerate(lon_lat):
+        tile_result = {
+            "longitude": lon,
+            "latitude": lat,
+            "prediction": predictions[idx],
+            "probas": probas[idx].tolist(),
+            "lat_h5": features_with_h3[idx][0],
+            "lon_h5": features_with_h3[idx][1],
+        }
+        results.append(tile_result)
 
-    all_features = np.vstack(all_features)
-    return all_features, all_paths
+    return pd.DataFrame(results)
 
-def save_features_to_parquet(features, paths, output_file):
-    print("Saving embeddings to parquet...")
-    df = pd.DataFrame(features)
-    df['file_path'] = paths
-    df.to_parquet(output_file, index=False)
-    print(f"Features saved to {output_file}")
 
-def run_embeddings_model(input_folder, output_file, model_weights_path, batch_size=16, normalize=False):
-    model, fpn = load_model(model_weights_path)
-    features, paths = process_images_in_batches(input_folder, model, fpn, batch_size=batch_size, normalize=normalize)
-    save_features_to_parquet(features, paths, output_file)
-
-#########################################################
-# Step 3: Convert Embeddings for ML Model Input
-#########################################################
-
-def load_embeddings_from_parquet(embeddings_file):
-    df = pd.read_parquet(embeddings_file)
-    # Separate features from paths
-    paths = df['file_path']
-    X = df.drop('file_path', axis=1).values
-    return X, paths
-
-# Optionally save as .h5 if needed
-def save_embeddings_h5(X, h5_file):
-    import h5py
-    with h5py.File(h5_file, 'w') as f:
-        f.create_dataset('embeddings', data=X)
-
-def load_embeddings_h5(h5_file):
-    import h5py
-    with h5py.File(h5_file, 'r') as f:
-        X = f['embeddings'][:]
-    return X
-
-#########################################################
-# Step 4: Run ML Model (XGBoost)
-#########################################################
-
-def run_ML_model(XGBoost_model_file, X):
-    xgb_model = xgb.XGBClassifier(
-        objective='multi:softmax',
-        eval_metric='mlogloss',
-        use_label_encoder=False,
-        random_state=42,
-        enable_categorical=False,
+def save_to_geoparquet(results, geo_path, output_path):
+    gdf = gpd.GeoDataFrame(
+        results,
+        geometry=gpd.points_from_xy(results["longitude"], results["latitude"]),
+        crs="EPSG:4326",
     )
-    xgb_model.load_model(XGBoost_model_file)
+    gdf_ = gdf.to_crs(27700)
+    aoi = gpd.read_file(geo_path)
 
-    predicted_values = xgb_model.predict(X)
-    predicted_probs = xgb_model.predict_proba(X)
-    return predicted_values, predicted_probs
+    gdf_fin = gpd.sjoin(aoi, gdf_, how="inner", predicate="contains")
+    gdf_fin.to_parquet(output_path, engine="pyarrow", index=False)
+    
 
-#########################################################
-# Step 5: Uncertainty Calculation
-#########################################################
+def spatial_sig_prediction(geo_path, vrt_file, model_weights, xgb_weights, output_path):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, fpn = load_model(model_weights)
+    
+    dataset = GeoTileDataset(geo_path, vrt_file, normalization_ranges =[(350, 1600), (500, 1600), (600, 1800)])
+    dataloader = DataLoader(dataset, batch_size=16, num_workers=4, collate_fn=custom_collate_fn)
+    
+    embeddings, tiles = extract_embeddings(dataloader, model, fpn, device)
 
-def calculate_uncertainty(predicted_probs, method='entropy'):
-    """
-    Calculate uncertainty from predicted probabilities.
-    method='entropy': uses Shannon entropy
-    """
-    if method == 'entropy':
-        # Entropy = -sum(p * log(p))
-        entropy = -(predicted_probs * np.log(predicted_probs+1e-10)).sum(axis=1)
-        return entropy
-    else:
-        # Add other methods if desired, e.g., top-2 margin
-        # margin = difference between top 2 predicted classes
-        # ...
-        raise NotImplementedError("Only 'entropy' method implemented")
+    gpkg = '/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/vectors/spatial_signatures_GB_clean.gpkg'
+    ss_gdf = gpd.read_file(gpkg, layer='spatial_signatures_GB_clean')
+    ss_gdf = ss_gdf[ss_gdf['type'] != 'outlier']
 
-#########################################################
-# Final Step: Save Predictions and Uncertainty
-#########################################################
+    # Define urbanity classes and clean 'type' column
+    urbanity_classes = ['Local urbanity', 'Regional urbanity', 'Metropolitan urbanity', 'Concentrated urbanity', 'Hyper concentrated urbanity']
+    ss_gdf['type_clean'] = ss_gdf['type'].apply(lambda x: 'Urbanity' if x in urbanity_classes else x)
+    le = LabelEncoder()
+    ss_gdf['type_clean_encode'] = le.fit_transform(ss_gdf['type_clean'])
 
-def save_predictions_to_parquet(paths, predicted_values, predicted_probs, uncertainty, output_file):
-    df = pd.DataFrame({
-        'file_path': paths,
-        'prediction': predicted_values,
-        'uncertainty': uncertainty
-    })
-    # If you want, you can also save predicted_probs as multiple columns:
-    for i in range(predicted_probs.shape[1]):
-        df[f'prob_class_{i}'] = predicted_probs[:, i]
 
-    df.to_parquet(output_file, index=False)
-    print(f"Predictions saved to {output_file}")
+    transformer = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
 
-#########################################################
-# Example Pipeline Usage
-#########################################################
+    xgb_classifier = xgb.XGBClassifier()
+    xgb_classifier.load_model(xgb_weights)
 
-if __name__ == "__main__":
-    # Example usage, assuming necessary inputs and paths
-    # 1. Create chips from VRT
-    # geo_df = ... load your geodataframe here ...
-    # specs = { ... } # specify your parameters
-    # create_chips_from_vrt(geo_df, specs)
+    results = classify_tiles(embeddings, tiles, xgb_classifier, ss_gdf, transformer)
 
-    # 2. Extract embeddings
-    # run_embeddings_model(input_folder="/path/to/chips",
-    #                      output_file="embeddings.parquet",
-    #                      model_weights_path="/path/to/model_weights.pt",
-    #                      batch_size=16,
-    #                      normalize=True)
+    save_to_geoparquet(
+        results, geo_path, output_path)
 
-    # 3. Load embeddings
-    # X, paths = load_embeddings_from_parquet("embeddings.parquet")
 
-    # (Optional) convert to h5
-    # save_embeddings_h5(X, "embeddings.h5")
-    # X = load_embeddings_h5("embeddings.h5")
 
-    # 4. Run ML model
-    # predicted_values, predicted_probs = run_ML_model("model.xgb", X)
-
-    # 5. Calculate uncertainty
-    # uncertainty = calculate_uncertainty(predicted_probs, method='entropy')
-
-    # 6. Save predictions
-    # save_predictions_to_parquet(paths, predicted_values, predicted_probs, uncertainty, "predictions.parquet")
-
-    pass
+'''
+example of how to run:
+# Run the pipeline
+pipeline.spatial_sig_prediction(
+    geo_path= "/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/london_25_25_grid_clipped.geojson",
+    vrt_file= "/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/mosaic_cube/vrt_allbands/2017_combined.vrt",
+    xgb_weights = "/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/predictions/xgb_model_25_latlonh6_jan25_weighted.bin",
+    model_weights = "/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/models/satlas/weights/satlas-model-v1-lowres.pth",
+    output_path= "/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/test.parquet"
+)
+'''
