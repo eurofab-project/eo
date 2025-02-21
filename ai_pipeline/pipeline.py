@@ -157,32 +157,6 @@ def extract_embeddings(dataloader, model, fpn, device):
     return np.vstack(embeddings), tiles
 
 
-def extract_feature_vectors(batch, model, fpn, device):
-    images, paths = batch
-    images = images.to(device)
-
-    # Run the images through the model and extract features
-    with autocast(), torch.no_grad():
-        outputs = []
-        x = images
-        for layer in model.features:
-            x = layer(x)
-            outputs.append(x.permute(0, 3, 1, 2))
-        map1, map2, map3, map4 = outputs[-7], outputs[-5], outputs[-3], outputs[-1]
-
-        # Process feature maps with FPN
-        feature_maps_raw = [map1, map2, map3, map4]
-        inp = collections.OrderedDict([('feat{}'.format(i), el) for i, el in enumerate(feature_maps_raw)])
-        fpn_output = fpn(inp)
-        fpn_output = list(fpn_output.values())
-
-        avgpool = torch.nn.AdaptiveAvgPool2d(1)
-        features = avgpool(fpn_output[-1])[:, :, 0, 0]  # Global avg pooling
-
-    return features.cpu().numpy(), paths
-
-
-
 def classify_tiles(embeddings, tiles, classifier, transformer, h3_resolution):
     lon_lat = []
     features_with_h3 = []
@@ -243,7 +217,7 @@ def spatial_sig_prediction(geo_path, vrt_file, model_weights, xgb_weights, outpu
     dataloader = DataLoader(dataset, batch_size=16, num_workers=4, collate_fn=custom_collate_fn)
     
     embeddings, tiles = extract_embeddings(dataloader, model, fpn, device)
-    pd.DataFrame(embeddings).to_csv('/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/london_emb.csv')
+    #pd.DataFrame(embeddings).to_csv('/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/london_emb.csv') #sanity check
 
     transformer = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
 
@@ -254,4 +228,33 @@ def spatial_sig_prediction(geo_path, vrt_file, model_weights, xgb_weights, outpu
     save_to_geoparquet(
         results, geo_path, output_path)
 
+
+
+#-------------------------------------------------
+#              DEPRECATED
+#-------------------------------------------------
+
+def extract_feature_vectors(batch, model, fpn, device):
+    images, paths = batch
+    images = images.to(device)
+
+    # Run the images through the model and extract features
+    with autocast(), torch.no_grad():
+        outputs = []
+        x = images
+        for layer in model.features:
+            x = layer(x)
+            outputs.append(x.permute(0, 3, 1, 2))
+        map1, map2, map3, map4 = outputs[-7], outputs[-5], outputs[-3], outputs[-1]
+
+        # Process feature maps with FPN
+        feature_maps_raw = [map1, map2, map3, map4]
+        inp = collections.OrderedDict([('feat{}'.format(i), el) for i, el in enumerate(feature_maps_raw)])
+        fpn_output = fpn(inp)
+        fpn_output = list(fpn_output.values())
+
+        avgpool = torch.nn.AdaptiveAvgPool2d(1)
+        features = avgpool(fpn_output[-1])[:, :, 0, 0]  # Global avg pooling
+
+    return features.cpu().numpy(), paths
 
