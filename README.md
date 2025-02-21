@@ -21,7 +21,7 @@ To execute the spatial signature prediction pipeline, use the following command:
 
 ```python
 pipeline.spatial_sig_prediction(
-    geo_path="../eo/data/example/liverpool_25_25_grid_clipped.geojson",
+    geo_path="../eo/data/example/london_25_25_grid_clipped.geojson",
     vrt_file="/satellite_demoland/data/mosaic_cube/vrt_allbands/2017_combined.vrt",
     xgb_weights="../eo/data/weights/xgb_model_25_latlonh6_feb25_weighted.bin",
     model_weights="/satellite_demoland/models/satlas/weights/satlas-model-v1-lowres.pth",
