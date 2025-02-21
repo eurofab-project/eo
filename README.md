@@ -21,11 +21,11 @@ To execute the spatial signature prediction pipeline, use the following command:
 
 ```python
 pipeline.spatial_sig_prediction(
-    geo_path="/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/eo/data/example/liverpool_25_25_grid_clipped.geojson",
-    vrt_file="/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/mosaic_cube/vrt_allbands/2017_combined.vrt",
-    xgb_weights="/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/eo/data/weights/xgb_model_25_latlonh6_feb25_weighted.bin",
-    model_weights="/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/models/satlas/weights/satlas-model-v1-lowres.pth",
-    output_path="/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/test_london_h6.parquet",
+    geo_path="../eo/data/example/liverpool_25_25_grid_clipped.geojson",
+    vrt_file="/satellite_demoland/data/mosaic_cube/vrt_allbands/2017_combined.vrt",
+    xgb_weights="../eo/data/weights/xgb_model_25_latlonh6_feb25_weighted.bin",
+    model_weights="/satellite_demoland/models/satlas/weights/satlas-model-v1-lowres.pth",
+    output_path="../eo/predictions/test_london_h6.parquet",
     h3_resolution=6
 )
 ```
