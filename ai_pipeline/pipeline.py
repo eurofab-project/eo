@@ -194,6 +194,18 @@ def classify_tiles(embeddings, tiles, classifier, transformer, h3_resolution):
     return pd.DataFrame(results)
 
 
+def load_geospatial_data(geo_path):
+    """
+    Load geospatial data from a GeoJSON or Parquet file.
+    """
+    if geo_path.endswith(".geojson"):
+        return gpd.read_file(geo_path)  # Reads GeoJSON
+    elif geo_path.endswith(".parquet"):
+        return gpd.read_parquet(geo_path)  # Reads Parquet
+    else:
+        raise ValueError("Unsupported file format. Provide a GeoJSON or GeoParquet file.")
+
+
 def save_to_geoparquet(results, geo_path, output_path):
     gdf = gpd.GeoDataFrame(
         results,
@@ -201,7 +213,7 @@ def save_to_geoparquet(results, geo_path, output_path):
         crs="EPSG:4326",
     )
     gdf_ = gdf.to_crs(27700)
-    aoi = gpd.read_file(geo_path)
+    aoi = load_geospatial_data(geo_path)
 
     gdf_fin = gpd.sjoin(aoi, gdf_, how="inner", predicate="contains")
 

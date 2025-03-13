@@ -10,10 +10,9 @@ import geopandas as gpd
 
 # Run the pipeline
 pipeline.spatial_sig_prediction(
-    geo_path= "/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/grid_clean.geojson",
+    geo_path= "/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/grid_clean.parquet",
     vrt_file= "/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/mosaic_cube/vrt_allbands/2017_combined.vrt",
-    xgb_weights = "/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/predictions/xgb_model_25_latlonh6_feb25_weighted.bin",
+    xgb_weights = "/bask/homes/f/fedu7800/vjgo8416-demoland/spatial_signatures/predictions/xgb_model_25_latlonh7_feb25_weighted.bin",
     model_weights = "/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/models/satlas/weights/satlas-model-v1-lowres.pth",
-    output_path= "/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/2017_predictions.parquet",
-    h3_resolution=6
-)
+    output_path= "/bask/homes/f/fedu7800/vjgo8416-demoland/satellite_demoland/data/2017_predictions_h7.parquet",
+    h3_resolution=7)
