@@ -28,6 +28,7 @@ website:
       - notebooks/matrix_sorting.ipynb
       - notebooks/run_pipeline.ipynb
       - notebooks/simulated_annealing.ipynb
+      - notebooks/vdc.ipynb
 
 format:
   html:
