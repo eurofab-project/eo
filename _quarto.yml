@@ -12,6 +12,8 @@ website:
       contents:
       - text: Project homepage
         href:  https://eurofab-project.github.io/
+      - text: Technical Notes
+        href:  https://eurofab-project.github.io/technical-notes/
       - text: Talks
         href:  https://eurofab-project.github.io/talks/
       - section: "Other work streams"
@@ -20,7 +22,10 @@ website:
           href:  https://eurofab-project.github.io/morphometrics/
     - section: "Notebooks"
       contents:
-      - notebooks/hello.ipynb
+      - notebooks/hilbert_split.ipynb
+      - notebooks/matrix_sorting.ipynb
+      - notebooks/run_pipeline.ipynb
+      - notebooks/simulated_annealing.ipynb
 
 format:
   html:
